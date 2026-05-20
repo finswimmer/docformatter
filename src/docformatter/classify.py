@@ -38,6 +38,46 @@ from docformatter.constants import MAX_PYTHON_VERSION
 
 PY312 = (sys.version_info[0], sys.version_info[1]) > MAX_PYTHON_VERSION
 
+_SEARCHING = 0
+_SAW_COLON = 1
+
+_SKIP_TOKEN_TYPES = frozenset(
+    {
+        tokenize.NEWLINE,
+        tokenize.NL,
+        tokenize.INDENT,
+        tokenize.DEDENT,
+        tokenize.COMMENT,
+        tokenize.NUMBER,
+    }
+)
+
+_BLOCKING_KEYWORDS = frozenset({"assert", "return", "raise", "yield", "del"})
+
+_DEFINITION_KEYWORDS = frozenset({"def", "async", "class"})
+
+
+def _is_name_after_definition(
+    tokens: list[tokenize.TokenInfo],
+    name_index: int,
+) -> bool:
+    """Return True if the NAME at name_index is preceded by a definition keyword."""
+    j = name_index - 1
+    while j >= 0 and tokens[j].type in (
+        tokenize.NEWLINE,
+        tokenize.NL,
+        tokenize.INDENT,
+        tokenize.DEDENT,
+        tokenize.COMMENT,
+        tokenize.OP,
+        tokenize.NUMBER,
+        tokenize.STRING,
+    ):
+        j -= 1
+    if j >= 0 and tokens[j].type == tokenize.NAME:
+        return tokens[j].string in _DEFINITION_KEYWORDS
+    return False
+
 
 def do_find_docstring_blocks(tokens: list[TokenInfo]) -> list[tuple[int, int, str]]:
     """Identify all docstring blocks and their anchor points.
@@ -162,91 +202,107 @@ def _do_find_anchor_index(
     return None
 
 
-def is_attribute_docstring(
+def is_attribute_docstring(  # noqa: PLR0911, PLR0912
     tokens: list[tokenize.TokenInfo],
     index: int,
 ) -> bool:
     """Return True if the string token is an attribute docstring.
+
+    An attribute docstring is a string that immediately follows an attribute
+    assignment or type annotation within a class body.  Valid patterns include:
+
+    - Simple assignment: ``x = 1`` followed by a docstring
+    - Annotated assignment: ``x: int = 1`` followed by a docstring
+    - Annotation only: ``x: int`` followed by a docstring
 
     Parameters
     ----------
     tokens : list[TokenInfo]
         A list of tokenized Python source code.
     index : int
-        Index of the anchor token.
+        Index of the STRING token to check.
 
     Returns
     -------
+    bool
         True if attribute docstring, False otherwise.
     """
     if index < 2:  # noqa: PLR2004
         return False
 
-    # Walk backward from the string looking for '=' or ':'
-    # If we encounter a STRING token before finding '=' or ':', return False
-    # because the string follows another string, not an attribute docstring.
+    # State machine walks backward from the string token.
+    # _SEARCHING: Look for "=" (attribute assignment) or ":" (type annotation).
+    # _SAW_COLON: After seeing ":", determine if it's a variable annotation
+    #             or part of a function/class definition.
+    state = _SEARCHING
+
+    # Tracks whether we've seen a closing paren while in SAW_COLON state.
+    # A ")" indicates we're walking through a function signature (e.g.,
+    # def foo(x: int):), so a NAME before it would be a parameter, not
+    # an attribute.
+    saw_paren = False
+
     i = index - 1
     while i >= 0:
         tok = tokens[i]
-        if tok.type == tokenize.OP and tok.string == "=":
-            return True
-        if tok.type == tokenize.OP and tok.string == ":":
-            # ':' is only valid for annotations (e.g., x: int = 1 or x: int)
-            # Check if the previous non-whitespace token is a NAME that's not
-            # def/async/class
-            j = i - 1
-            while j >= 0 and tokens[j].type in (
-                tokenize.NEWLINE,
-                tokenize.NL,
-                tokenize.INDENT,
-                tokenize.DEDENT,
-                tokenize.COMMENT,
-            ):
-                j -= 1
-            if j >= 0 and tokens[j].type == tokenize.NAME:
-                # Check if this NAME is part of a class/def definition
-                # by looking for class/def/async before it
-                k = j - 1
-                while k >= 0 and tokens[k].type in (
-                    tokenize.NEWLINE,
-                    tokenize.NL,
-                    tokenize.INDENT,
-                    tokenize.DEDENT,
-                    tokenize.COMMENT,
-                    tokenize.OP,
-                    tokenize.NUMBER,
-                    tokenize.STRING,
-                ):
-                    k -= 1
-                if k >= 0 and tokens[k].type == tokenize.NAME:
-                    if tokens[k].string in ("def", "async", "class"):
-                        return False
-                # Also check if j is the first token after INDENT (likely a definition)
-                if j > 0 and tokens[j - 1].type == tokenize.INDENT:
-                    return False
-                return True
-            return False
-        if tok.type == tokenize.STRING:
-            return False
-        if tok.type in (
-            tokenize.NEWLINE,
-            tokenize.NL,
-            tokenize.INDENT,
-            tokenize.DEDENT,
-            tokenize.COMMENT,
-            tokenize.NUMBER,
-        ):
-            i -= 1
-            continue
-        # NAME tokens: check if this is a keyword like assert/return (blocker)
-        # or part of an annotation like 'int' in 'x: int' (not a blocker)
-        if tok.type == tokenize.NAME:
-            if tok.string in ("assert", "return", "raise", "yield", "del"):
+        tok_type = tok.type
+        tok_string = tok.string
+
+        if state == _SEARCHING:
+            if tok_type == tokenize.OP:
+                if tok_string == "=":
+                    # Found assignment: x = """docstring"""
+                    return True
+                if tok_string == ":":
+                    # Possible type annotation: x: int or x: int = value
+                    state = _SAW_COLON
+            elif tok_type == tokenize.STRING:
+                # Another string precedes this one, not an attribute docstring
                 return False
-            # Other NAME tokens might be annotation types, skip them
-            i -= 1
-            continue
-        # Skip other operators
+            elif tok_type == tokenize.NAME:
+                if tok_string in _BLOCKING_KEYWORDS:
+                    # String is part of a statement (return, assert, etc.)
+                    return False
+            elif tok_type not in _SKIP_TOKEN_TYPES:
+                pass
+
+        elif state == _SAW_COLON:
+            if tok_type == tokenize.OP:
+                if tok_string == "=":
+                    # Annotated assignment: x: int = """docstring"""
+                    return True
+                if tok_string == ")":
+                    # Function signature context: def foo(x: int):
+                    # The colon belongs to the function, not an attribute.
+                    saw_paren = True
+            elif tok_type == tokenize.STRING:
+                # Another string precedes this one
+                return False
+            elif tok_type == tokenize.NAME:
+                if tok_string in _DEFINITION_KEYWORDS:
+                    # Colon belongs to def/class, not an attribute
+                    return False
+                if tok_string in _BLOCKING_KEYWORDS:
+                    # String is part of a statement (return, assert, etc.)
+                    return False
+                if _is_name_after_definition(tokens, i):
+                    # NAME is the function/class name (e.g., "foo" in "def foo:")
+                    return False
+                if (
+                    i > 0
+                    and tokens[i - 1].type == tokenize.OP
+                    and tokens[i - 1].string == "->"
+                ):
+                    # Return type annotation: def foo() -> int:
+                    return False
+                if not saw_paren:
+                    # Variable annotation: x: int (no function signature context)
+                    return True
+                # If saw_paren is True, this is a parameter annotation
+                # like def foo(x: int):, which is not an attribute.
+            elif tok_type not in _SKIP_TOKEN_TYPES:
+                pass
+
         i -= 1
 
     return False
