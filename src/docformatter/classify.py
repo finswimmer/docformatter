@@ -27,14 +27,15 @@
 """This module provides docformatter's classification functions."""
 
 # Standard Library Imports
+import os
 import re
 import sys
 import tokenize
+from dataclasses import dataclass
 from tokenize import TokenInfo
-from typing import Union
 
 # docformatter Package Imports
-from docformatter.constants import MAX_PYTHON_VERSION
+from docformatter.constants import MAX_PYTHON_VERSION, QUOTE_TYPES
 
 PY312 = (sys.version_info[0], sys.version_info[1]) > MAX_PYTHON_VERSION
 
@@ -58,7 +59,7 @@ _DEFINITION_KEYWORDS = frozenset({"def", "async", "class"})
 
 
 def _is_name_after_definition(
-    tokens: list[tokenize.TokenInfo],
+    tokens: list[TokenInfo],
     name_index: int,
 ) -> bool:
     """Return True if the NAME at name_index is preceded by a definition keyword."""
@@ -79,17 +80,233 @@ def _is_name_after_definition(
     return False
 
 
+@dataclass
+class _DocstringContext:
+    """Track the parsing state for docstring detection.
+
+    Attributes
+    ----------
+    scope : str
+        Current scope: "module", "class", or "function".
+    first_statement_seen : bool
+        False until the first statement is encountered in the current scope.
+    last_was_assignment : bool
+        True if the last processed token was an assignment operator.
+    anchor_index : int | None
+        Index of the class/def/async/assignment token that anchors this scope.
+    in_decorator : bool
+        True if currently processing a decorator (between @ and def/class).
+    assignment_anchor_index : int | None
+        Index of the NAME token before the most recent `=` for attribute docstrings.
+    in_signature : bool
+        True while inside a function/class definition signature (before body colon).
+    """
+
+    scope: str = "module"
+    first_statement_seen: bool = False
+    last_was_assignment: bool = False
+    anchor_index: int | None = None
+    in_decorator: bool = False
+    assignment_anchor_index: int | None = None
+    in_signature: bool = False
+
+
+def _is_docstring_prefix(token_string: str) -> bool:
+    """Return True if the token string starts with a valid docstring quote.
+
+    Parameters
+    ----------
+    token_string : str
+        The string token to check.
+
+    Returns
+    -------
+    bool
+        True if the token starts with a valid triple-quote prefix.
+    """
+    return any(token_string.startswith(quote) for quote in QUOTE_TYPES)
+
+
+def do_find_docstring_blocks_v2(  # noqa: PLR0912, PLR0915
+    tokens: list[TokenInfo],
+) -> list[tuple[int, int, str]]:
+    """Identify all docstring blocks using a single-pass forward approach.
+
+    This function uses a context stack to track nesting levels and determine
+    docstring types without backward scanning.
+
+    Parameters
+    ----------
+    tokens : list[TokenInfo]
+        A list of tokenized Python source code.
+
+    Returns
+    -------
+    list[tuple[int, int, str]]
+        A list of tuples representing each docstring block. Each tuple contains:
+            - anchor_index (int): Index of the anchor token.
+            - string_index (int): Index of the docstring token.
+            - docstring_type (str): One of "module", "class", "function", or
+              "attribute".
+    """
+    docstring_blocks: list[tuple[int, int, str]] = []
+    context_stack: list[_DocstringContext] = [_DocstringContext(scope="module")]
+    prev_name_index: int | None = None
+    paren_depth: int = 0
+    bracket_depth: int = 0
+    brace_depth: int = 0
+    just_saw_definition: bool = False
+
+    for i, token in enumerate(tokens):
+        current_ctx = context_stack[-1]
+
+        if token.type in (tokenize.ENCODING, tokenize.COMMENT):
+            continue
+
+        if token.type == tokenize.OP and token.string == "@":
+            current_ctx.in_decorator = True
+            prev_name_index = None
+            continue
+
+        if token.type == tokenize.NAME and token.string in ("class", "def", "async"):
+            if token.string == "async":
+                prev_name_index = None
+                continue
+
+            current_ctx.in_decorator = False
+            new_ctx = _DocstringContext(
+                scope="class" if token.string == "class" else "function",
+                anchor_index=i,
+                in_decorator=False,
+                in_signature=True,
+            )
+            context_stack.append(new_ctx)
+            prev_name_index = None
+            just_saw_definition = True
+            continue
+
+        if token.type == tokenize.NAME and token.string in ("import", "from"):
+            current_ctx.first_statement_seen = True
+            current_ctx.last_was_assignment = False
+            just_saw_definition = False
+            continue
+
+        if token.type == tokenize.NAME:
+            prev_name_index = i
+
+        if token.type == tokenize.OP and token.string == "=":
+            current_ctx.last_was_assignment = True
+            current_ctx.assignment_anchor_index = prev_name_index
+            just_saw_definition = False
+            continue
+
+        if token.type == tokenize.OP and token.string == ":":
+            if current_ctx.in_signature:
+                if paren_depth == 0:
+                    current_ctx.in_signature = False
+                just_saw_definition = False
+                continue
+            if just_saw_definition:
+                just_saw_definition = False
+                continue
+            if (
+                prev_name_index is not None
+                and paren_depth == 0
+                and not current_ctx.in_decorator
+            ):
+                current_ctx.last_was_assignment = True
+                current_ctx.assignment_anchor_index = prev_name_index
+            just_saw_definition = False
+            continue
+
+        if token.type == tokenize.OP and token.string == "(":
+            paren_depth += 1
+            continue
+
+        if token.type == tokenize.OP and token.string == ")":
+            paren_depth -= 1
+            continue
+
+        if token.type == tokenize.OP and token.string == "[":
+            bracket_depth += 1
+            continue
+
+        if token.type == tokenize.OP and token.string == "]":
+            bracket_depth -= 1
+            continue
+
+        if token.type == tokenize.OP and token.string == "{":
+            brace_depth += 1
+            continue
+
+        if token.type == tokenize.OP and token.string == "}":
+            brace_depth -= 1
+            continue
+
+        if token.type == tokenize.DEDENT:
+            if len(context_stack) > 1:
+                context_stack.pop()
+                if context_stack:
+                    context_stack[-1].last_was_assignment = False
+                    context_stack[-1].first_statement_seen = True
+            continue
+
+        if token.type == tokenize.NAME and token.string in _BLOCKING_KEYWORDS:
+            current_ctx.first_statement_seen = True
+            current_ctx.last_was_assignment = False
+            prev_name_index = None
+            continue
+
+        if token.type == tokenize.STRING and _is_docstring_prefix(token.string):
+            if current_ctx.scope == "module" and not current_ctx.first_statement_seen:
+                docstring_blocks.append((0, i, "module"))
+                current_ctx.first_statement_seen = True
+                current_ctx.last_was_assignment = False
+                continue
+
+            if current_ctx.last_was_assignment:
+                anchor_idx = current_ctx.assignment_anchor_index
+                if anchor_idx is not None:
+                    docstring_blocks.append((anchor_idx, i, "attribute"))
+                current_ctx.last_was_assignment = False
+                continue
+
+            if (
+                current_ctx.scope in ("class", "function")
+                and not current_ctx.first_statement_seen
+                and current_ctx.anchor_index is not None
+            ):
+                docstring_blocks.append(
+                    (current_ctx.anchor_index, i, current_ctx.scope)
+                )
+                current_ctx.first_statement_seen = True
+                continue
+
+        if token.type in (tokenize.NEWLINE, tokenize.NL):
+            if current_ctx.last_was_assignment:
+                current_ctx.first_statement_seen = True
+                current_ctx.last_was_assignment = False
+
+    i = 1
+    while i < len(docstring_blocks):
+        if docstring_blocks[i][0] == docstring_blocks[i - 1][0]:
+            docstring_blocks.pop(i)
+        i += 1
+
+    return docstring_blocks
+
+
 def do_find_docstring_blocks(tokens: list[TokenInfo]) -> list[tuple[int, int, str]]:
     """Identify all docstring blocks and their anchor points.
 
     Parameters
     ----------
-    tokens (list[TokenInfo]):
+    tokens : list[TokenInfo]
         A list of tokenized Python source code.
 
     Returns
     -------
-    list[tuple[int, int, str]]:
+    list[tuple[int, int, str]]
         A list of tuples representing each docstring block.  Each tuple contains:
             - anchor_index (int): Index of the anchor (class, def, async def, or
               assignment).
@@ -97,6 +314,9 @@ def do_find_docstring_blocks(tokens: list[TokenInfo]) -> list[tuple[int, int, st
             - docstring_type (str): One of "module", "class", "function", or
               "attribute".
     """
+    if os.environ.get("DOCFORMATTER_TEST_NEW_IMPL"):
+        return do_find_docstring_blocks_v2(tokens)
+
     docstring_blocks = []
 
     for i, token in enumerate(tokens):
@@ -155,23 +375,23 @@ def _do_find_anchor_index(
     tokens: list[TokenInfo],
     docstring_index: int,
     target: str,
-) -> Union[int, None]:
+) -> int | None:
     """Walk backward from a docstring to find the matching anchor.
 
     The matching anchor would be one of `class`, `def`, `async def`, or an assignment.
 
     Parameters
     ----------
-    tokens (list[TokenInfo]):
+    tokens : list[TokenInfo]
         A list of tokenized Python source code.
-    docstring_index (int):
+    docstring_index : int
         Index of the STRING token representing the docstring.
-    target (str):
+    target : str
         One of "class", "def", or "attribute" indicating what to search for.
 
     Returns
     -------
-    int | None:
+    int | None
         Index of the anchor token if found, otherwise None.
     """
     i = docstring_index - 1
@@ -203,7 +423,7 @@ def _do_find_anchor_index(
 
 
 def is_attribute_docstring(  # noqa: PLR0911, PLR0912
-    tokens: list[tokenize.TokenInfo],
+    tokens: list[TokenInfo],
     index: int,
 ) -> bool:
     """Return True if the string token is an attribute docstring.
@@ -309,7 +529,7 @@ def is_attribute_docstring(  # noqa: PLR0911, PLR0912
 
 
 def is_class_docstring(
-    tokens: list[tokenize.TokenInfo],
+    tokens: list[TokenInfo],
     index: int,
 ) -> bool:
     """Determine if docstring is a class docstring."""
@@ -327,16 +547,14 @@ def is_class_docstring(
     return False
 
 
-def is_closing_quotes(
-    token: tokenize.TokenInfo, prev_token: tokenize.TokenInfo
-) -> bool:
+def is_closing_quotes(token: TokenInfo, prev_token: TokenInfo) -> bool:
     """Determine if token is a closing quote for a docstring.
 
     Parameters
     ----------
-    token : tokenize.TokenInfo
+    token : TokenInfo
         The token to check.
-    prev_token : tokenize.TokenInfo
+    prev_token : TokenInfo
         The previous token in the stream.
 
     Returns
@@ -358,12 +576,12 @@ def is_closing_quotes(
     return False
 
 
-def is_code_line(token: tokenize.TokenInfo) -> bool:
+def is_code_line(token: TokenInfo) -> bool:
     """Determine if token is a line of code.
 
     Parameters
     ----------
-    token : tokenize.TokenInfo
+    token : TokenInfo
         The token to check.
 
     Returns
@@ -381,12 +599,12 @@ def is_code_line(token: tokenize.TokenInfo) -> bool:
     return False
 
 
-def is_definition_line(token: tokenize.TokenInfo) -> bool:
+def is_definition_line(token: TokenInfo) -> bool:
     """Determine if token is a class or function/method definition line.
 
     Parameters
     ----------
-    token : tokenize.TokenInfo
+    token : TokenInfo
         The token to check.
 
     Returns
@@ -404,14 +622,14 @@ def is_definition_line(token: tokenize.TokenInfo) -> bool:
     return False
 
 
-def is_f_string(token: tokenize.TokenInfo, prev_token: tokenize.TokenInfo) -> bool:
+def is_f_string(token: TokenInfo, prev_token: TokenInfo) -> bool:
     """Determine if token is an f-string.
 
     Parameters
     ----------
-    token : tokenize.TokenInfo
+    token : TokenInfo
         The token to check.
-    prev_token : tokenize.TokenInfo
+    prev_token : TokenInfo
         The previous token in the stream.
 
     Returns
@@ -436,7 +654,7 @@ def is_f_string(token: tokenize.TokenInfo, prev_token: tokenize.TokenInfo) -> bo
 
 
 def is_function_or_method_docstring(
-    tokens: list[tokenize.TokenInfo],
+    tokens: list[TokenInfo],
     index: int,
 ) -> bool:
     """Determine if docstring is a function or method docstring."""
@@ -458,12 +676,12 @@ def is_function_or_method_docstring(
     return False
 
 
-def is_inline_comment(token: tokenize.TokenInfo) -> bool:
+def is_inline_comment(token: TokenInfo) -> bool:
     """Determine if token is an inline comment.
 
     Parameters
     ----------
-    token : tokenize.TokenInfo
+    token : TokenInfo
         The token to check.
 
     Returns
@@ -477,16 +695,16 @@ def is_inline_comment(token: tokenize.TokenInfo) -> bool:
 
 
 def is_line_following_indent(
-    token: tokenize.TokenInfo,
-    prev_token: tokenize.TokenInfo,
+    token: TokenInfo,
+    prev_token: TokenInfo,
 ) -> bool:
     """Determine if token is a line that follows an indent.
 
     Parameters
     ----------
-    token : tokenize.TokenInfo
+    token : TokenInfo
         The token to check.
-    prev_token : tokenize.TokenInfo
+    prev_token : TokenInfo
         The previous token in the stream.
 
     Returns
@@ -501,7 +719,7 @@ def is_line_following_indent(
 
 
 def is_module_docstring(
-    tokens: list[tokenize.TokenInfo],
+    tokens: list[TokenInfo],
     index: int,
 ) -> bool:
     """Determine if docstring is a module docstring."""
@@ -517,12 +735,12 @@ def is_module_docstring(
     return True
 
 
-def is_nested_definition_line(token: tokenize.TokenInfo) -> bool:
+def is_nested_definition_line(token: TokenInfo) -> bool:
     """Determine if token is a nested class or function/method definition line.
 
     Parameters
     ----------
-    token : tokenize.TokenInfo
+    token : TokenInfo
         The token to check.
 
     Returns
@@ -534,16 +752,16 @@ def is_nested_definition_line(token: tokenize.TokenInfo) -> bool:
 
 
 def is_newline_continuation(
-    token: tokenize.TokenInfo,
-    prev_token: tokenize.TokenInfo,
+    token: TokenInfo,
+    prev_token: TokenInfo,
 ) -> bool:
     """Determine if token is a continuation of a previous line.
 
     Parameters
     ----------
-    token : tokenize.TokenInfo
+    token : TokenInfo
         The token to check.
-    prev_token : tokenize.TokenInfo
+    prev_token : TokenInfo
         The previous token in the stream.
 
     Returns
@@ -562,16 +780,16 @@ def is_newline_continuation(
 
 
 def is_string_variable(
-    token: tokenize.TokenInfo,
-    prev_token: tokenize.TokenInfo,
+    token: TokenInfo,
+    prev_token: TokenInfo,
 ) -> bool:
     """Determine if token is a string variable assignment.
 
     Parameters
     ----------
-    token : tokenize.TokenInfo
+    token : TokenInfo
         The token to check.
-    prev_token : tokenize.TokenInfo
+    prev_token : TokenInfo
         The previous token in the stream.
 
     Returns
@@ -595,7 +813,7 @@ def is_string_variable(
     return False
 
 
-def is_docstring_at_end_of_file(tokens: list[tokenize.TokenInfo], index: int) -> bool:
+def is_docstring_at_end_of_file(tokens: list[TokenInfo], index: int) -> bool:
     """Determine if the docstring is at the end of the file."""
     for i in range(index + 1, len(tokens)):
         tok = tokens[i]
