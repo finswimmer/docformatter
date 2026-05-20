@@ -27,7 +27,6 @@
 """This module provides docformatter's classification functions."""
 
 # Standard Library Imports
-import os
 import re
 import sys
 import tokenize
@@ -39,45 +38,9 @@ from docformatter.constants import MAX_PYTHON_VERSION, QUOTE_TYPES
 
 PY312 = (sys.version_info[0], sys.version_info[1]) > MAX_PYTHON_VERSION
 
-_SEARCHING = 0
-_SAW_COLON = 1
-
-_SKIP_TOKEN_TYPES = frozenset(
-    {
-        tokenize.NEWLINE,
-        tokenize.NL,
-        tokenize.INDENT,
-        tokenize.DEDENT,
-        tokenize.COMMENT,
-        tokenize.NUMBER,
-    }
-)
-
 _BLOCKING_KEYWORDS = frozenset({"assert", "return", "raise", "yield", "del"})
 
 _DEFINITION_KEYWORDS = frozenset({"def", "async", "class"})
-
-
-def _is_name_after_definition(
-    tokens: list[TokenInfo],
-    name_index: int,
-) -> bool:
-    """Return True if the NAME at name_index is preceded by a definition keyword."""
-    j = name_index - 1
-    while j >= 0 and tokens[j].type in (
-        tokenize.NEWLINE,
-        tokenize.NL,
-        tokenize.INDENT,
-        tokenize.DEDENT,
-        tokenize.COMMENT,
-        tokenize.OP,
-        tokenize.NUMBER,
-        tokenize.STRING,
-    ):
-        j -= 1
-    if j >= 0 and tokens[j].type == tokenize.NAME:
-        return tokens[j].string in _DEFINITION_KEYWORDS
-    return False
 
 
 @dataclass
@@ -317,7 +280,7 @@ def _deduplicate_docstrings(
     return docstring_blocks
 
 
-def do_find_docstring_blocks_v2(  # noqa: PLR0912, PLR0915
+def _do_find_docstring_blocks_single_pass(  # noqa: PLR0912, PLR0915
     tokens: list[TokenInfo],
 ) -> list[tuple[int, int, str]]:
     """Identify all docstring blocks using a single-pass forward approach.
@@ -445,237 +408,7 @@ def do_find_docstring_blocks(tokens: list[TokenInfo]) -> list[tuple[int, int, st
             - docstring_type (str): One of "module", "class", "function", or
               "attribute".
     """
-    if os.environ.get("DOCFORMATTER_TEST_NEW_IMPL"):
-        return do_find_docstring_blocks_v2(tokens)
-
-    docstring_blocks = []
-
-    for i, token in enumerate(tokens):
-        if (
-            token.type != tokenize.STRING
-            or not (
-                token.string.startswith('"""')
-                or token.string.startswith('r"""')
-                or token.string.startswith('R"""')
-                or token.string.startswith('u"""')
-                or token.string.startswith('U"""')
-                or token.string.startswith("'''")
-                or token.string.startswith("r'''")
-                or token.string.startswith("R'''")
-                or token.string.startswith("u'''")
-                or token.string.startswith("U'''")
-            )
-            or " = " in token.line
-        ):
-            continue
-
-        if is_module_docstring(tokens, i):
-            docstring_blocks.append((0, i, "module"))
-            continue
-
-        if is_attribute_docstring(tokens, i):
-            anchor_idx = _do_find_anchor_index(tokens, i, target="attribute")
-            if anchor_idx is not None:
-                docstring_blocks.append((anchor_idx, i, "attribute"))
-            continue
-
-        if is_class_docstring(tokens, i):
-            anchor_idx = _do_find_anchor_index(tokens, i, target="class")
-            if anchor_idx is not None:
-                docstring_blocks.append((anchor_idx, i, "class"))
-            continue
-
-        if is_function_or_method_docstring(tokens, i):
-            anchor_idx = _do_find_anchor_index(tokens, i, target="def")
-            if anchor_idx is not None:
-                docstring_blocks.append((anchor_idx, i, "function"))
-            continue
-
-    # If adjacent docstrings have the same anchor index, remove the second one as
-    # there can only be one docstring per anchor.
-    i = 1
-    while i < len(docstring_blocks):
-        if docstring_blocks[i][0] == docstring_blocks[i - 1][0]:
-            docstring_blocks.pop(i)
-        i += 1
-
-    return docstring_blocks
-
-
-def _do_find_anchor_index(
-    tokens: list[TokenInfo],
-    docstring_index: int,
-    target: str,
-) -> int | None:
-    """Walk backward from a docstring to find the matching anchor.
-
-    The matching anchor would be one of `class`, `def`, `async def`, or an assignment.
-
-    Parameters
-    ----------
-    tokens : list[TokenInfo]
-        A list of tokenized Python source code.
-    docstring_index : int
-        Index of the STRING token representing the docstring.
-    target : str
-        One of "class", "def", or "attribute" indicating what to search for.
-
-    Returns
-    -------
-    int | None
-        Index of the anchor token if found, otherwise None.
-    """
-    i = docstring_index - 1
-    saw_decorator = False
-
-    while i >= 0:
-        tok = tokens[i]
-
-        if tok.type == tokenize.OP and tok.string == "@":
-            saw_decorator = True
-
-        if target == "class" and tok.type == tokenize.NAME and tok.string == "class":
-            return i
-
-        if target == "def" and tok.type == tokenize.NAME and tok.string == "def":
-            # Handle @decorator above def
-            if saw_decorator:
-                while i > 0 and tokens[i - 1].type != tokenize.NEWLINE:
-                    i -= 1
-            return i
-
-        if target == "attribute":
-            if tok.type == tokenize.NAME:
-                return i
-
-        i -= 1
-
-    return None
-
-
-def is_attribute_docstring(  # noqa: PLR0911, PLR0912
-    tokens: list[TokenInfo],
-    index: int,
-) -> bool:
-    """Return True if the string token is an attribute docstring.
-
-    An attribute docstring is a string that immediately follows an attribute
-    assignment or type annotation within a class body.  Valid patterns include:
-
-    - Simple assignment: ``x = 1`` followed by a docstring
-    - Annotated assignment: ``x: int = 1`` followed by a docstring
-    - Annotation only: ``x: int`` followed by a docstring
-
-    Parameters
-    ----------
-    tokens : list[TokenInfo]
-        A list of tokenized Python source code.
-    index : int
-        Index of the STRING token to check.
-
-    Returns
-    -------
-    bool
-        True if attribute docstring, False otherwise.
-    """
-    if index < 2:  # noqa: PLR2004
-        return False
-
-    # State machine walks backward from the string token.
-    # _SEARCHING: Look for "=" (attribute assignment) or ":" (type annotation).
-    # _SAW_COLON: After seeing ":", determine if it's a variable annotation
-    #             or part of a function/class definition.
-    state = _SEARCHING
-
-    # Tracks whether we've seen a closing paren while in SAW_COLON state.
-    # A ")" indicates we're walking through a function signature (e.g.,
-    # def foo(x: int):), so a NAME before it would be a parameter, not
-    # an attribute.
-    saw_paren = False
-
-    i = index - 1
-    while i >= 0:
-        tok = tokens[i]
-        tok_type = tok.type
-        tok_string = tok.string
-
-        if state == _SEARCHING:
-            if tok_type == tokenize.OP:
-                if tok_string == "=":
-                    # Found assignment: x = """docstring"""
-                    return True
-                if tok_string == ":":
-                    # Possible type annotation: x: int or x: int = value
-                    state = _SAW_COLON
-            elif tok_type == tokenize.STRING:
-                # Another string precedes this one, not an attribute docstring
-                return False
-            elif tok_type == tokenize.NAME:
-                if tok_string in _BLOCKING_KEYWORDS:
-                    # String is part of a statement (return, assert, etc.)
-                    return False
-            elif tok_type not in _SKIP_TOKEN_TYPES:
-                pass
-
-        elif state == _SAW_COLON:
-            if tok_type == tokenize.OP:
-                if tok_string == "=":
-                    # Annotated assignment: x: int = """docstring"""
-                    return True
-                if tok_string == ")":
-                    # Function signature context: def foo(x: int):
-                    # The colon belongs to the function, not an attribute.
-                    saw_paren = True
-            elif tok_type == tokenize.STRING:
-                # Another string precedes this one
-                return False
-            elif tok_type == tokenize.NAME:
-                if tok_string in _DEFINITION_KEYWORDS:
-                    # Colon belongs to def/class, not an attribute
-                    return False
-                if tok_string in _BLOCKING_KEYWORDS:
-                    # String is part of a statement (return, assert, etc.)
-                    return False
-                if _is_name_after_definition(tokens, i):
-                    # NAME is the function/class name (e.g., "foo" in "def foo:")
-                    return False
-                if (
-                    i > 0
-                    and tokens[i - 1].type == tokenize.OP
-                    and tokens[i - 1].string == "->"
-                ):
-                    # Return type annotation: def foo() -> int:
-                    return False
-                if not saw_paren:
-                    # Variable annotation: x: int (no function signature context)
-                    return True
-                # If saw_paren is True, this is a parameter annotation
-                # like def foo(x: int):, which is not an attribute.
-            elif tok_type not in _SKIP_TOKEN_TYPES:
-                pass
-
-        i -= 1
-
-    return False
-
-
-def is_class_docstring(
-    tokens: list[TokenInfo],
-    index: int,
-) -> bool:
-    """Determine if docstring is a class docstring."""
-    # Walk backward to find the most recent `class` keyword before the string,
-    # without crossing over a `def`, `async`, or another block
-    for i in range(index - 1, -1, -1):
-        tok = tokens[i]
-        if tok.type == tokenize.NAME and tok.string == "class":
-            return True
-        if tok.type == tokenize.NAME and tok.string in ("def", "async"):
-            return False  # Hit enclosing function or method first.
-        if tok.type == tokenize.OP and tok.string == "=":
-            return False  # Hit assignment, not a class docstring.
-
-    return False
+    return _do_find_docstring_blocks_single_pass(tokens)
 
 
 def is_closing_quotes(token: TokenInfo, prev_token: TokenInfo) -> bool:
@@ -784,29 +517,6 @@ def is_f_string(token: TokenInfo, prev_token: TokenInfo) -> bool:
     return False
 
 
-def is_function_or_method_docstring(
-    tokens: list[TokenInfo],
-    index: int,
-) -> bool:
-    """Determine if docstring is a function or method docstring."""
-    for i in range(index - 1, -1, -1):
-        tok = tokens[i]
-        if tok.type == tokenize.NAME and tok.string in ("def", "async"):
-            return True
-        if tok.type == tokenize.NAME and tok.string == "class":
-            return False  # hit enclosing class first
-        if tok.type == tokenize.NAME and tok.string in (
-            "assert",
-            "return",
-            "raise",
-            "yield",
-            "del",
-        ):
-            return False  # string is part of an expression, not a docstring
-
-    return False
-
-
 def is_inline_comment(token: TokenInfo) -> bool:
     """Determine if token is an inline comment.
 
@@ -847,23 +557,6 @@ def is_line_following_indent(
         return True
 
     return False
-
-
-def is_module_docstring(
-    tokens: list[TokenInfo],
-    index: int,
-) -> bool:
-    """Determine if docstring is a module docstring."""
-    # No code tokens before the string
-    for k in range(index):
-        if tokens[k][0] not in (
-            tokenize.ENCODING,
-            tokenize.COMMENT,
-            tokenize.NEWLINE,
-            tokenize.NL,
-        ):
-            return False
-    return True
 
 
 def is_nested_definition_line(token: TokenInfo) -> bool:

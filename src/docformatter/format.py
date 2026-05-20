@@ -259,7 +259,7 @@ def _get_attribute_docstring_newlines(
     _num_tokens = len(tokens)
     _offset = 2
 
-    for i in range(index + 2, _num_tokens - index - 1):
+    for i in range(index + 2, _num_tokens):
         if tokens[i].line == "\n":
             _offset += 1
         else:
@@ -394,15 +394,18 @@ def _get_module_docstring_newlines() -> int:
 
 
 def _get_newlines_by_type(
+    docstring_type: str,
     tokens: list[tokenize.TokenInfo],
     index: int,
 ) -> int:
-    """Dispatch to the correct docstring formatter based on context.
+    """Dispatch to the correct docstring formatter based on type.
 
     Returns the number of newlines to insert after the docstring.
 
     Parameters
     ----------
+    docstring_type : str
+        The type of docstring: "module", "class", "function", or "attribute".
     tokens : list
         A list of tokens from the source code.
     index : int
@@ -414,19 +417,14 @@ def _get_newlines_by_type(
         The number of newlines to insert after the docstring.
     """
     if _classify.is_docstring_at_end_of_file(tokens, index):
-        # print("End of file")
         return 0
-    elif _classify.is_module_docstring(tokens, index):
-        # print("Module")
+    elif docstring_type == "module":
         return _get_module_docstring_newlines()
-    elif _classify.is_class_docstring(tokens, index):
-        # print("Class")
+    elif docstring_type == "class":
         return _get_class_docstring_newlines(tokens, index)
-    elif _classify.is_function_or_method_docstring(tokens, index):
-        # print("Function or method")
+    elif docstring_type == "function":
         return _get_function_docstring_newlines(tokens, index)
-    elif _classify.is_attribute_docstring(tokens, index):
-        # print("Attribute")
+    elif docstring_type == "attribute":
         return _get_attribute_docstring_newlines(tokens, index)
 
     return 0  # Default: probably a string literal
@@ -1095,6 +1093,7 @@ class Formatter:
 
                 _docstring_token = tokens[_docstr_idx]
                 _blank_line_count = _get_newlines_by_type(
+                    _type,
                     tokens,
                     _docstr_idx,
                 )

@@ -221,23 +221,23 @@ def test_do_remove_preceding_blank_lines(test_key, block):
 @pytest.mark.integration
 @pytest.mark.order(5)
 @pytest.mark.parametrize(
-    "test_key",
+    "test_key, docstring_type",
     [
-        "get_newlines_by_type_module_docstring",
-        "get_newlines_by_type_module_docstring_black",
-        "get_newlines_by_type_class_docstring",
-        "get_newlines_by_type_function_docstring",
-        "get_newlines_by_type_attribute_docstring",
+        ("get_newlines_by_type_module_docstring", "module"),
+        ("get_newlines_by_type_module_docstring_black", "module"),
+        ("get_newlines_by_type_class_docstring", "class"),
+        ("get_newlines_by_type_function_docstring", "function"),
+        ("get_newlines_by_type_attribute_docstring", "attribute"),
     ],
 )
-def test_get_newlines_by_type(test_key):
+def test_get_newlines_by_type(test_key, docstring_type):
     source = TEST_STRINGS[test_key]["source"]
     expected = TEST_STRINGS[test_key]["expected"]
 
     tokens = _get_tokens(source)
     index = _get_docstring_token_and_index(tokens)
 
-    result = _format._get_newlines_by_type(tokens, index)
+    result = _format._get_newlines_by_type(docstring_type, tokens, index)
     assert result == expected, f"\nFailed {test_key}\nExpected {expected}\nGot {result}"
 
 

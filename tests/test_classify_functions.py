@@ -47,16 +47,12 @@ import pytest
 # docformatter Package Imports
 from docformatter.classify import (
     do_find_docstring_blocks,
-    is_attribute_docstring,
-    is_class_docstring,
     is_closing_quotes,
     is_code_line,
     is_definition_line,
     is_f_string,
-    is_function_or_method_docstring,
     is_inline_comment,
     is_line_following_indent,
-    is_module_docstring,
     is_nested_definition_line,
     is_newline_continuation,
     is_string_variable,
@@ -70,13 +66,6 @@ def get_tokens(source: str) -> list[tokenize.TokenInfo]:
     return list(tokenize.tokenize(BytesIO(source.encode()).readline))
 
 
-def get_string_index(tokens: list[tokenize.TokenInfo]) -> int:
-    for i, tok in enumerate(tokens):
-        if tok.type == tokenize.STRING:
-            return i
-    raise ValueError("No string token found.")
-
-
 def build_token(prefix: str, test_key: str) -> tokenize.TokenInfo:
     """Build a tokenize.TokenInfo from test data using a prefix ('' or 'prev_')."""
     data = TEST_STRINGS[test_key]
@@ -87,29 +76,6 @@ def build_token(prefix: str, test_key: str) -> tokenize.TokenInfo:
         end=tuple(data[f"{prefix}end"]),
         line=data[f"{prefix}line"],
     )
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "test_key, classifier",
-    [
-        ("is_module_docstring", is_module_docstring),
-        ("is_class_docstring", is_class_docstring),
-        ("is_method_docstring", is_function_or_method_docstring),
-        ("is_function_docstring", is_function_or_method_docstring),
-        ("is_attribute_docstring", is_attribute_docstring),
-        ("is_not_attribute_docstring", is_attribute_docstring),
-    ],
-)
-def test_docstring_classifiers(test_key, classifier):
-    source = TEST_STRINGS[test_key]["instring"]
-    expected = TEST_STRINGS[test_key]["expected"]
-
-    tokens = get_tokens(source)
-    index = get_string_index(tokens)
-
-    result = classifier(tokens, index)
-    assert result == expected, f"\nFailed {test_key}\nExpected {expected}\nGot {result}"
 
 
 @pytest.mark.unit
