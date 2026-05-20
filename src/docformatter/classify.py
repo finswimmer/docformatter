@@ -24,7 +24,20 @@
 # ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-"""This module provides docformatter's classification functions."""
+"""This module provides docstring's classification functions.
+
+Docstring Detection Architecture
+==================================
+
+This module implements a single-pass forward tokenizer approach to detect
+Python docstrings. The algorithm maintains a context stack that tracks:
+- Current scope (module, class, function)
+- Whether the first statement has been seen
+- Whether an assignment was just made (for attribute docstrings)
+
+For each STRING token, the classifier checks the current context to determine
+if it's a docstring and what type (module, class, function, or attribute).
+"""
 
 # Standard Library Imports
 import re
@@ -107,6 +120,16 @@ def _classify_docstring_single_pass(  # noqa: PLR0911
 ) -> tuple[str | None, int | None]:
     """Classify a STRING token as a docstring in a single pass.
 
+    The decision logic follows these rules in order:
+    1. If the token is not a valid docstring prefix (triple-quote), return None.
+    2. If an assignment was just made (last_was_assignment), check if the string
+       appears in a line with " = " (regular string literal, not a docstring).
+       Otherwise, return "attribute" if there's a valid assignment anchor.
+    3. If in module scope and no statement seen yet, this is a module docstring.
+    4. If in class/function scope, no statement seen, and there's an anchor
+       (the class/def token), this is a class/function docstring.
+    5. Otherwise, the string is not a docstring (e.g., a regular string expression).
+
     Parameters
     ----------
     token : TokenInfo
@@ -123,11 +146,15 @@ def _classify_docstring_single_pass(  # noqa: PLR0911
     """
     current_ctx = context_stack[-1]
 
+    # Rule 1: Must start with triple quotes
     if not _is_docstring_prefix(token.string):
         return None, None
 
+    # Rule 2: After assignment operator - check for attribute docstrings
+    # vs regular string literals (e.g., x = "not a docstring")
     if current_ctx.last_was_assignment:
         current_ctx.last_was_assignment = False
+        # " = " in line indicates a regular assignment, not an attribute docstring
         if " = " in token.line:
             return None, None
         anchor_idx = current_ctx.assignment_anchor_index
@@ -135,11 +162,13 @@ def _classify_docstring_single_pass(  # noqa: PLR0911
             return "attribute", anchor_idx
         return None, None
 
+    # Rule 3: Module-level docstring (first statement in module scope)
     if current_ctx.scope == "module" and not current_ctx.first_statement_seen:
         current_ctx.first_statement_seen = True
         current_ctx.last_was_assignment = False
         return "module", 0
 
+    # Rule 4: Class or function docstring (first statement after def/class)
     if (
         current_ctx.scope in ("class", "function")
         and not current_ctx.first_statement_seen
@@ -148,6 +177,7 @@ def _classify_docstring_single_pass(  # noqa: PLR0911
         current_ctx.first_statement_seen = True
         return current_ctx.scope, current_ctx.anchor_index
 
+    # Rule 5: Not a docstring (string expression, not first statement)
     return None, None
 
 
@@ -191,6 +221,19 @@ def _handle_assignment_token(
 ) -> tuple[bool, bool]:
     """Handle an assignment operator (= or :) token.
 
+    The key difference between = and : tokens:
+    - '=' always marks an assignment. It sets last_was_assignment=True and records
+      the previous NAME token as the assignment anchor for potential attribute
+      docstrings (e.g., attr: str = "docstring").
+    - ':' has multiple meanings:
+      * In a function/class signature (in_signature=True, paren_depth==0): marks
+        end of type annotation, not an assignment.
+      * After a definition keyword (just_saw_definition=True): marks the body
+        colon of a class/def, not an assignment.
+      * Otherwise (standalone, paren_depth==0, not in decorator): this is a
+        type-only annotation like `attr: str`, which can have an attribute
+        docstring on the next line.
+
     Parameters
     ----------
     token : TokenInfo
@@ -211,18 +254,25 @@ def _handle_assignment_token(
     """
     current_ctx = context_stack[-1]
 
+    # '=' is always an assignment operator
     if token.string == "=":
         current_ctx.last_was_assignment = True
         current_ctx.assignment_anchor_index = prev_name_index
         return False, True
 
+    # ':' has context-dependent meaning
     if token.string == ":":
+        # Inside function/class signature - this is a type annotation colon
         if current_ctx.in_signature:
             if paren_depth == 0:
                 current_ctx.in_signature = False
             return False, True
+        # After class/def keyword - this is the body colon
         if just_saw_definition:
             return False, True
+        # Standalone colon at module/class/function level:
+        # Type annotation without assignment (e.g., `attr: str`)
+        # Can have an attribute docstring on the following line
         if (
             prev_name_index is not None
             and paren_depth == 0
@@ -241,6 +291,14 @@ def _handle_scope_exit(
 ) -> None:
     """Handle DEDENT token for scope exit.
 
+    Scopes are exited when a DEDENT token is encountered:
+    - The context stack always has at least one element (the module scope).
+    - When len(context_stack) > 1, we're exiting a nested scope (class or function).
+    - Popping the stack returns to the parent scope.
+    - After exiting, the parent scope's last_was_assignment is cleared and
+      first_statement_seen is set to True, since the nested block counts as
+      a statement in the parent scope.
+
     Parameters
     ----------
     token : TokenInfo
@@ -250,9 +308,11 @@ def _handle_scope_exit(
     """
     if token.type != tokenize.DEDENT:
         return
+    # Only pop if there's a nested scope to exit (keep module scope)
     if len(context_stack) > 1:
         context_stack.pop()
         if context_stack:
+            # Mark parent scope: the exited block was a statement
             context_stack[-1].last_was_assignment = False
             context_stack[-1].first_statement_seen = True
 
@@ -276,7 +336,8 @@ def _deduplicate_docstrings(
     while i < len(docstring_blocks):
         if docstring_blocks[i][0] == docstring_blocks[i - 1][0]:
             docstring_blocks.pop(i)
-        i += 1
+        else:
+            i += 1
     return docstring_blocks
 
 
@@ -381,6 +442,7 @@ def _do_find_docstring_blocks_single_pass(  # noqa: PLR0912, PLR0915
         if token.type == tokenize.STRING:
             result = _classify_docstring_single_pass(token, i, context_stack)
             if result[0] is not None:
+                assert result[1] is not None
                 docstring_blocks.append((result[1], i, result[0]))
 
         if token.type in (tokenize.NEWLINE, tokenize.NL):
@@ -493,7 +555,11 @@ def is_f_string(token: TokenInfo, prev_token: TokenInfo) -> bool:
         True if the token is an f-string, False otherwise.
     """
     if PY312:
-        return tokenize.FSTRING_MIDDLE in [token.type, prev_token.type]
+        fstring_mid = tokenize.FSTRING_MIDDLE  # type: ignore[attr-defined]
+        return fstring_mid in [
+            token.type,
+            prev_token.type,
+        ]
     return any(
         [
             token.string.startswith('f"""'),
@@ -614,7 +680,23 @@ def is_string_variable(
 
 
 def is_docstring_at_end_of_file(tokens: list[TokenInfo], index: int) -> bool:
-    """Determine if the docstring is at the end of the file."""
+    """Determine if the docstring is at the end of the file.
+
+    Checks all tokens after the given index to see if only structural tokens
+    (newlines, dedents, end marker) remain.
+
+    Parameters
+    ----------
+    tokens : list[TokenInfo]
+        The full list of tokens from the source file.
+    index : int
+        The index of the docstring token to check.
+
+    Returns
+    -------
+    bool
+        True if only structural tokens follow the docstring, False otherwise.
+    """
     for i in range(index + 1, len(tokens)):
         tok = tokens[i]
         if tok.type not in (
