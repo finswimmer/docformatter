@@ -430,14 +430,11 @@ def is_closing_quotes(token: TokenInfo, prev_token: TokenInfo) -> bool:
     if prev_token.line.endswith("\n"):
         _offset = prev_token.line.split("\n")[-2]
 
-    if (
+    return (
         token.line.strip() == '"""'
         and token.type == tokenize.NEWLINE
         or token.line == _offset
-    ):
-        return True
-
-    return False
+    )
 
 
 def is_code_line(token: TokenInfo) -> bool:
@@ -453,14 +450,11 @@ def is_code_line(token: TokenInfo) -> bool:
     bool
         True if the token is a code line, False otherwise.
     """
-    if (token.type == tokenize.NAME or token.string == "...") and not (
+    return (token.type == tokenize.NAME or token.string == "...") and not (
         token.line.strip().startswith("def ")
         or token.line.strip().startswith("async ")
         or token.line.strip().startswith("class ")
-    ):
-        return True
-
-    return False
+    )
 
 
 def is_definition_line(token: TokenInfo) -> bool:
@@ -476,14 +470,11 @@ def is_definition_line(token: TokenInfo) -> bool:
     bool
         True if the token is a definition line, False otherwise.
     """
-    if token.type == tokenize.NAME and (
+    return token.type == tokenize.NAME and (
         token.line.startswith("def ")
         or token.line.startswith("async ")
         or token.line.startswith("class ")
-    ):
-        return True
-
-    return False
+    )
 
 
 def is_f_string(token: TokenInfo, prev_token: TokenInfo) -> bool:
@@ -502,19 +493,15 @@ def is_f_string(token: TokenInfo, prev_token: TokenInfo) -> bool:
         True if the token is an f-string, False otherwise.
     """
     if PY312:
-        if tokenize.FSTRING_MIDDLE in [token.type, prev_token.type]:
-            return True
-    elif any(
+        return tokenize.FSTRING_MIDDLE in [token.type, prev_token.type]
+    return any(
         [
             token.string.startswith('f"""'),
             prev_token.string.startswith('f"""'),
             token.string.startswith("f'''"),
             prev_token.string.startswith("f'''"),
         ]
-    ):
-        return True
-
-    return False
+    )
 
 
 def is_inline_comment(token: TokenInfo) -> bool:
@@ -530,9 +517,7 @@ def is_inline_comment(token: TokenInfo) -> bool:
     bool
         True if the token is an inline comment, False otherwise.
     """
-    if token.line.strip().startswith('"""') and token.string.startswith("#"):
-        return True
-    return False
+    return token.line.strip().startswith('"""') and token.string.startswith("#")
 
 
 def is_line_following_indent(
@@ -553,10 +538,7 @@ def is_line_following_indent(
     bool
         True if the token is a line that follows an indent, False otherwise.
     """
-    if prev_token.type == tokenize.INDENT and prev_token.line in token.line:
-        return True
-
-    return False
+    return prev_token.type == tokenize.INDENT and prev_token.line in token.line
 
 
 def is_nested_definition_line(token: TokenInfo) -> bool:
@@ -593,14 +575,11 @@ def is_newline_continuation(
     bool
         True if the token is a continuation of a previous line, False otherwise.
     """
-    if (
+    return (
         token.type in (tokenize.NEWLINE, tokenize.NL)
         and token.line.strip() in prev_token.line.strip()
         and token.line not in {"\n", "\r\n"}
-    ):
-        return True
-
-    return False
+    )
 
 
 def is_string_variable(
@@ -629,12 +608,9 @@ def is_string_variable(
     else:
         _token_types = (tokenize.OP,)
 
-    if prev_token.type in _token_types and (
+    return prev_token.type in _token_types and (
         '= """' in token.line or token.line in prev_token.line
-    ):
-        return True
-
-    return False
+    )
 
 
 def is_docstring_at_end_of_file(tokens: list[TokenInfo], index: int) -> bool:
