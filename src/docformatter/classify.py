@@ -127,6 +127,196 @@ def _is_docstring_prefix(token_string: str) -> bool:
     return any(token_string.startswith(quote) for quote in QUOTE_TYPES)
 
 
+def _is_scope_token(token: TokenInfo) -> bool:
+    """Return True if token is a scope-defining keyword (class, def, async)."""
+    return token.type == tokenize.NAME and token.string in _DEFINITION_KEYWORDS
+
+
+def _is_assignment_token(token: TokenInfo) -> bool:
+    """Return True if token is an assignment operator (= or :)."""
+    return token.type == tokenize.OP and token.string in ("=", ":")
+
+
+def _classify_docstring_single_pass(  # noqa: PLR0911
+    token: TokenInfo,
+    token_index: int,
+    context_stack: list[_DocstringContext],
+) -> tuple[str | None, int | None]:
+    """Classify a STRING token as a docstring in a single pass.
+
+    Parameters
+    ----------
+    token : TokenInfo
+        The STRING token to classify.
+    token_index : int
+        Index of the token in the token list.
+    context_stack : list[_DocstringContext]
+        Current context stack tracking scope and state.
+
+    Returns
+    -------
+    tuple[str | None, int | None]
+        (docstring_type, anchor_index) or (None, None) if not a docstring.
+    """
+    current_ctx = context_stack[-1]
+
+    if not _is_docstring_prefix(token.string):
+        return None, None
+
+    if current_ctx.last_was_assignment:
+        current_ctx.last_was_assignment = False
+        if " = " in token.line:
+            return None, None
+        anchor_idx = current_ctx.assignment_anchor_index
+        if anchor_idx is not None:
+            return "attribute", anchor_idx
+        return None, None
+
+    if current_ctx.scope == "module" and not current_ctx.first_statement_seen:
+        current_ctx.first_statement_seen = True
+        current_ctx.last_was_assignment = False
+        return "module", 0
+
+    if (
+        current_ctx.scope in ("class", "function")
+        and not current_ctx.first_statement_seen
+        and current_ctx.anchor_index is not None
+    ):
+        current_ctx.first_statement_seen = True
+        return current_ctx.scope, current_ctx.anchor_index
+
+    return None, None
+
+
+def _handle_definition_token(
+    token: TokenInfo,
+    token_index: int,
+    context_stack: list[_DocstringContext],
+) -> None:
+    """Handle a class/def/async definition token.
+
+    Parameters
+    ----------
+    token : TokenInfo
+        The definition keyword token.
+    token_index : int
+        Index of the token in the token list.
+    context_stack : list[_DocstringContext]
+        Context stack to update.
+    """
+    current_ctx = context_stack[-1]
+    current_ctx.in_decorator = False
+
+    if token.string == "async":
+        return
+
+    new_ctx = _DocstringContext(
+        scope="class" if token.string == "class" else "function",
+        anchor_index=token_index,
+        in_decorator=False,
+        in_signature=True,
+    )
+    context_stack.append(new_ctx)
+
+
+def _handle_assignment_token(
+    token: TokenInfo,
+    prev_name_index: int | None,
+    paren_depth: int,
+    just_saw_definition: bool,
+    context_stack: list[_DocstringContext],
+) -> tuple[bool, bool]:
+    """Handle an assignment operator (= or :) token.
+
+    Parameters
+    ----------
+    token : TokenInfo
+        The assignment operator token.
+    prev_name_index : int | None
+        Index of the previous NAME token.
+    paren_depth : int
+        Current parenthesis nesting depth.
+    just_saw_definition : bool
+        Whether we just saw a definition keyword.
+    context_stack : list[_DocstringContext]
+        Context stack to update.
+
+    Returns
+    -------
+    tuple[bool, bool]
+        Updated (just_saw_definition, continue_flag).
+    """
+    current_ctx = context_stack[-1]
+
+    if token.string == "=":
+        current_ctx.last_was_assignment = True
+        current_ctx.assignment_anchor_index = prev_name_index
+        return False, True
+
+    if token.string == ":":
+        if current_ctx.in_signature:
+            if paren_depth == 0:
+                current_ctx.in_signature = False
+            return False, True
+        if just_saw_definition:
+            return False, True
+        if (
+            prev_name_index is not None
+            and paren_depth == 0
+            and not current_ctx.in_decorator
+        ):
+            current_ctx.last_was_assignment = True
+            current_ctx.assignment_anchor_index = prev_name_index
+        return False, True
+
+    return just_saw_definition, False
+
+
+def _handle_scope_exit(
+    token: TokenInfo,
+    context_stack: list[_DocstringContext],
+) -> None:
+    """Handle DEDENT token for scope exit.
+
+    Parameters
+    ----------
+    token : TokenInfo
+        The DEDENT token.
+    context_stack : list[_DocstringContext]
+        Context stack to update.
+    """
+    if token.type != tokenize.DEDENT:
+        return
+    if len(context_stack) > 1:
+        context_stack.pop()
+        if context_stack:
+            context_stack[-1].last_was_assignment = False
+            context_stack[-1].first_statement_seen = True
+
+
+def _deduplicate_docstrings(
+    docstring_blocks: list[tuple[int, int, str]],
+) -> list[tuple[int, int, str]]:
+    """Remove adjacent docstrings with the same anchor index.
+
+    Parameters
+    ----------
+    docstring_blocks : list[tuple[int, int, str]]
+        List of docstring blocks to deduplicate.
+
+    Returns
+    -------
+    list[tuple[int, int, str]]
+        Deduplicated list of docstring blocks.
+    """
+    i = 1
+    while i < len(docstring_blocks):
+        if docstring_blocks[i][0] == docstring_blocks[i - 1][0]:
+            docstring_blocks.pop(i)
+        i += 1
+    return docstring_blocks
+
+
 def do_find_docstring_blocks_v2(  # noqa: PLR0912, PLR0915
     tokens: list[TokenInfo],
 ) -> list[tuple[int, int, str]]:
@@ -168,19 +358,9 @@ def do_find_docstring_blocks_v2(  # noqa: PLR0912, PLR0915
             prev_name_index = None
             continue
 
-        if token.type == tokenize.NAME and token.string in ("class", "def", "async"):
-            if token.string == "async":
-                prev_name_index = None
-                continue
-
+        if _is_scope_token(token):
             current_ctx.in_decorator = False
-            new_ctx = _DocstringContext(
-                scope="class" if token.string == "class" else "function",
-                anchor_index=i,
-                in_decorator=False,
-                in_signature=True,
-            )
-            context_stack.append(new_ctx)
+            _handle_definition_token(token, i, context_stack)
             prev_name_index = None
             just_saw_definition = True
             continue
@@ -194,30 +374,12 @@ def do_find_docstring_blocks_v2(  # noqa: PLR0912, PLR0915
         if token.type == tokenize.NAME:
             prev_name_index = i
 
-        if token.type == tokenize.OP and token.string == "=":
-            current_ctx.last_was_assignment = True
-            current_ctx.assignment_anchor_index = prev_name_index
-            just_saw_definition = False
-            continue
-
-        if token.type == tokenize.OP and token.string == ":":
-            if current_ctx.in_signature:
-                if paren_depth == 0:
-                    current_ctx.in_signature = False
-                just_saw_definition = False
+        if _is_assignment_token(token):
+            just_saw_definition, cont = _handle_assignment_token(
+                token, prev_name_index, paren_depth, just_saw_definition, context_stack
+            )
+            if cont:
                 continue
-            if just_saw_definition:
-                just_saw_definition = False
-                continue
-            if (
-                prev_name_index is not None
-                and paren_depth == 0
-                and not current_ctx.in_decorator
-            ):
-                current_ctx.last_was_assignment = True
-                current_ctx.assignment_anchor_index = prev_name_index
-            just_saw_definition = False
-            continue
 
         if token.type == tokenize.OP and token.string == "(":
             paren_depth += 1
@@ -244,11 +406,7 @@ def do_find_docstring_blocks_v2(  # noqa: PLR0912, PLR0915
             continue
 
         if token.type == tokenize.DEDENT:
-            if len(context_stack) > 1:
-                context_stack.pop()
-                if context_stack:
-                    context_stack[-1].last_was_assignment = False
-                    context_stack[-1].first_statement_seen = True
+            _handle_scope_exit(token, context_stack)
             continue
 
         if token.type == tokenize.NAME and token.string in _BLOCKING_KEYWORDS:
@@ -257,43 +415,16 @@ def do_find_docstring_blocks_v2(  # noqa: PLR0912, PLR0915
             prev_name_index = None
             continue
 
-        if token.type == tokenize.STRING and _is_docstring_prefix(token.string):
-            if current_ctx.scope == "module" and not current_ctx.first_statement_seen:
-                docstring_blocks.append((0, i, "module"))
-                current_ctx.first_statement_seen = True
-                current_ctx.last_was_assignment = False
-                continue
-
-            if current_ctx.last_was_assignment:
-                anchor_idx = current_ctx.assignment_anchor_index
-                if anchor_idx is not None:
-                    docstring_blocks.append((anchor_idx, i, "attribute"))
-                current_ctx.last_was_assignment = False
-                continue
-
-            if (
-                current_ctx.scope in ("class", "function")
-                and not current_ctx.first_statement_seen
-                and current_ctx.anchor_index is not None
-            ):
-                docstring_blocks.append(
-                    (current_ctx.anchor_index, i, current_ctx.scope)
-                )
-                current_ctx.first_statement_seen = True
-                continue
+        if token.type == tokenize.STRING:
+            result = _classify_docstring_single_pass(token, i, context_stack)
+            if result[0] is not None:
+                docstring_blocks.append((result[1], i, result[0]))
 
         if token.type in (tokenize.NEWLINE, tokenize.NL):
             if current_ctx.last_was_assignment:
                 current_ctx.first_statement_seen = True
-                current_ctx.last_was_assignment = False
 
-    i = 1
-    while i < len(docstring_blocks):
-        if docstring_blocks[i][0] == docstring_blocks[i - 1][0]:
-            docstring_blocks.pop(i)
-        i += 1
-
-    return docstring_blocks
+    return _deduplicate_docstrings(docstring_blocks)
 
 
 def do_find_docstring_blocks(tokens: list[TokenInfo]) -> list[tuple[int, int, str]]:
