@@ -182,24 +182,74 @@ def is_attribute_docstring(
     if index < 2:  # noqa: PLR2004
         return False
 
-    # Step 1: Find the previous NEWLINE before the docstring
-    k = index - 1
-    while k > 0 and tokens[k].type != tokenize.NEWLINE:
-        k -= 1
+    # Walk backward from the string looking for '=' or ':'
+    # If we encounter a STRING token before finding '=' or ':', return False
+    # because the string follows another string, not an attribute docstring.
+    i = index - 1
+    while i >= 0:
+        tok = tokens[i]
+        if tok.type == tokenize.OP and tok.string == "=":
+            return True
+        if tok.type == tokenize.OP and tok.string == ":":
+            # ':' is only valid for annotations (e.g., x: int = 1 or x: int)
+            # Check if the previous non-whitespace token is a NAME that's not
+            # def/async/class
+            j = i - 1
+            while j >= 0 and tokens[j].type in (
+                tokenize.NEWLINE,
+                tokenize.NL,
+                tokenize.INDENT,
+                tokenize.DEDENT,
+                tokenize.COMMENT,
+            ):
+                j -= 1
+            if j >= 0 and tokens[j].type == tokenize.NAME:
+                # Check if this NAME is part of a class/def definition
+                # by looking for class/def/async before it
+                k = j - 1
+                while k >= 0 and tokens[k].type in (
+                    tokenize.NEWLINE,
+                    tokenize.NL,
+                    tokenize.INDENT,
+                    tokenize.DEDENT,
+                    tokenize.COMMENT,
+                    tokenize.OP,
+                    tokenize.NUMBER,
+                    tokenize.STRING,
+                ):
+                    k -= 1
+                if k >= 0 and tokens[k].type == tokenize.NAME:
+                    if tokens[k].string in ("def", "async", "class"):
+                        return False
+                # Also check if j is the first token after INDENT (likely a definition)
+                if j > 0 and tokens[j - 1].type == tokenize.INDENT:
+                    return False
+                return True
+            return False
+        if tok.type == tokenize.STRING:
+            return False
+        if tok.type in (
+            tokenize.NEWLINE,
+            tokenize.NL,
+            tokenize.INDENT,
+            tokenize.DEDENT,
+            tokenize.COMMENT,
+            tokenize.NUMBER,
+        ):
+            i -= 1
+            continue
+        # NAME tokens: check if this is a keyword like assert/return (blocker)
+        # or part of an annotation like 'int' in 'x: int' (not a blocker)
+        if tok.type == tokenize.NAME:
+            if tok.string in ("assert", "return", "raise", "yield", "del"):
+                return False
+            # Other NAME tokens might be annotation types, skip them
+            i -= 1
+            continue
+        # Skip other operators
+        i -= 1
 
-    # Step 2: Check for '=' or ':' on the line *before* the docstring
-    seen_equal_or_colon = False
-    for tok in tokens[0:index]:
-        if tok.type == tokenize.OP and tok.string == "=" and '"""' not in tok.line:
-            seen_equal_or_colon = True
-            break
-        else:
-            seen_equal_or_colon = False
-
-    if not seen_equal_or_colon:
-        return False
-
-    return True
+    return False
 
 
 def is_class_docstring(
@@ -340,6 +390,14 @@ def is_function_or_method_docstring(
             return True
         if tok.type == tokenize.NAME and tok.string == "class":
             return False  # hit enclosing class first
+        if tok.type == tokenize.NAME and tok.string in (
+            "assert",
+            "return",
+            "raise",
+            "yield",
+            "del",
+        ):
+            return False  # string is part of an expression, not a docstring
 
     return False
 

@@ -1116,7 +1116,8 @@ expected='''class C:
     """Class.""" #noqa
 
     attr: int
-    """Attr."""'''
+    """Attr."""
+'''
 
 [issue_187]
 source='''
@@ -1244,3 +1245,37 @@ expected='''"""A."""
 
 pass
 '''
+
+[do_not_break_asserts]
+source='''def test_foo() -> None:
+    assert """\
+    Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore magna aliquyam erat,
+    sed diam voluptua. At vero eos et accusam et justo duo dolores et ea rebum. Stet clita kasd gubergren, no sea takimata sanctus est Lorem
+    ipsum dolor sit amet.
+"""'''
+
+expected='''def test_foo() -> None:
+    assert """\
+    Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore magna aliquyam erat,
+    sed diam voluptua. At vero eos et accusam et justo duo dolores et ea rebum. Stet clita kasd gubergren, no sea takimata sanctus est Lorem
+    ipsum dolor sit amet.
+"""'''
+
+[do_not_break_asserts_complex]
+source='''def test_foo() -> None:
+    bar = 42
+
+    assert """\
+    Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore magna aliquyam erat,
+    sed diam voluptua. At vero eos et accusam et justo duo dolores et ea rebum. Stet clita kasd gubergren, no sea takimata sanctus est Lorem
+    ipsum dolor sit amet.
+"""'''
+
+expected='''def test_foo() -> None:
+    bar = 42
+
+    assert """\
+    Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore magna aliquyam erat,
+    sed diam voluptua. At vero eos et accusam et justo duo dolores et ea rebum. Stet clita kasd gubergren, no sea takimata sanctus est Lorem
+    ipsum dolor sit amet.
+"""'''
