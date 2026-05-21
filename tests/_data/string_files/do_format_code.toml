@@ -1279,3 +1279,28 @@ expected='''def test_foo() -> None:
     sed diam voluptua. At vero eos et accusam et justo duo dolores et ea rebum. Stet clita kasd gubergren, no sea takimata sanctus est Lorem
     ipsum dolor sit amet.
 """'''
+
+
+[two_blank_lines_after_var_string]
+source='''baz  = 42
+"""A famous number.
+
+Answer about the univers.
+"""
+
+@bar
+def foo():
+    pass
+'''
+
+expected='''baz  = 42
+"""A famous number.
+
+Answer about the univers.
+"""
+
+
+@bar
+def foo():
+    pass
+'''

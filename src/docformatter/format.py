@@ -265,10 +265,26 @@ def _get_attribute_docstring_newlines(
         else:
             break
 
-    if tokens[index + _offset].line.startswith("class") or tokens[
-        index + _offset
-    ].line.startswith("def"):
-        return 2
+    _next_idx = index + _offset
+
+    # Skip over decorator lines to check for class or def
+    while _next_idx < len(tokens):
+        _line = tokens[_next_idx].line
+        if _line.startswith("@"):
+            # Skip to the next non-blank line after the decorator
+            _next_idx += 1
+            while _next_idx < len(tokens):
+                if tokens[_next_idx].line == "\n":
+                    _next_idx += 1
+                else:
+                    break
+            continue
+        break
+
+    if _next_idx < len(tokens):
+        _next_line = tokens[_next_idx].line
+        if _next_line.startswith("class") or _next_line.startswith("def"):
+            return 2
 
     return 1
 
