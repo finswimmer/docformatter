@@ -1350,3 +1350,33 @@ Answer about the univers.
 async def foo():
     pass
 '''
+
+[two_blank_lines_after_var_string_multiline_decorator]
+source='''baz  = 42
+"""A famous number.
+
+Answer about the univers.
+"""
+
+@decorator(
+    arg1,
+    arg2,
+)
+def foo():
+    pass
+'''
+
+expected='''baz  = 42
+"""A famous number.
+
+Answer about the univers.
+"""
+
+
+@decorator(
+    arg1,
+    arg2,
+)
+def foo():
+    pass
+'''

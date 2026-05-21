@@ -146,6 +146,7 @@ with open("tests/_data/string_files/do_format_code.toml", "rb") as f:
         ("two_blank_lines_after_var_string", NO_ARGS),
         ("two_blank_lines_after_var_string_async", NO_ARGS),
         ("two_blank_lines_after_var_string_async_decorated", NO_ARGS),
+        ("two_blank_lines_after_var_string_multiline_decorator", NO_ARGS),
     ],
 )
 def test_do_format_code(test_key, test_args, args):
