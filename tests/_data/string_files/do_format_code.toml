@@ -1380,3 +1380,50 @@ Answer about the univers.
 def foo():
     pass
 '''
+
+[two_blank_lines_between_classes_after_attr_docstring]
+source='''class A:
+    """Docstring."""
+
+    attr = 1
+    """Attribute docstring.
+
+    With multiple lines.
+    """
+
+class B:
+    """Second class."""
+'''
+
+expected='''class A:
+    """Docstring."""
+
+    attr = 1
+    """Attribute docstring.
+
+    With multiple lines.
+    """
+
+
+class B:
+    """Second class."""
+'''
+
+[issue_multiline_string_argument]
+source='''class A:
+    foo = Field(
+        min_length=1,
+        description="""
+            Description text here.
+        """,
+    )
+'''
+
+expected='''class A:
+    foo = Field(
+        min_length=1,
+        description="""
+            Description text here.
+        """,
+    )
+'''

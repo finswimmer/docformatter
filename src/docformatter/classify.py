@@ -252,6 +252,16 @@ def is_attribute_docstring(  # noqa: PLR0911, PLR0912
             if tok_type == tokenize.OP:
                 if tok_string == "=":
                     # Found assignment: x = """docstring"""
+                    # But if we're inside parentheses, it's a keyword argument
+                    _balance = 0
+                    for j in range(i):
+                        if tokens[j].type == tokenize.OP:
+                            if tokens[j].string == "(":
+                                _balance += 1
+                            elif tokens[j].string == ")":
+                                _balance -= 1
+                    if _balance > 0:
+                        return False
                     return True
                 if tok_string == ":":
                     # Possible type annotation: x: int or x: int = value
@@ -270,6 +280,16 @@ def is_attribute_docstring(  # noqa: PLR0911, PLR0912
             if tok_type == tokenize.OP:
                 if tok_string == "=":
                     # Annotated assignment: x: int = """docstring"""
+                    # But if we're inside parentheses, it's a keyword argument
+                    _balance = 0
+                    for j in range(i):
+                        if tokens[j].type == tokenize.OP:
+                            if tokens[j].string == "(":
+                                _balance += 1
+                            elif tokens[j].string == ")":
+                                _balance -= 1
+                    if _balance > 0:
+                        return False
                     return True
                 if tok_string == ")":
                     # Function signature context: def foo(x: int):

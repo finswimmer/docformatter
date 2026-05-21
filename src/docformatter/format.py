@@ -259,7 +259,7 @@ def _get_attribute_docstring_newlines(
     _num_tokens = len(tokens)
     _offset = 2
 
-    for i in range(index + 2, _num_tokens - index - 1):
+    for i in range(index + 2, _num_tokens):
         if tokens[i].line == "\n":
             _offset += 1
         else:
@@ -267,7 +267,7 @@ def _get_attribute_docstring_newlines(
 
     _next_idx = index + _offset
 
-    # Skip over decorators to check for class or def
+    # Skip over decorators, comments, and indent/dedent tokens to check for class or def
     while _next_idx < len(tokens):
         if tokens[_next_idx].type == tokenize.OP and tokens[_next_idx].string == "@":
             # Skip to the end of the decorator line (handles multiline decorators)
@@ -282,6 +282,13 @@ def _get_attribute_docstring_newlines(
                     _next_idx += 1
                 else:
                     break
+            continue
+        if tokens[_next_idx].type in (
+            tokenize.COMMENT,
+            tokenize.INDENT,
+            tokenize.DEDENT,
+        ):
+            _next_idx += 1
             continue
         break
 
