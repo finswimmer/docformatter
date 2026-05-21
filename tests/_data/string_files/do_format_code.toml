@@ -1304,3 +1304,49 @@ Answer about the univers.
 def foo():
     pass
 '''
+
+[two_blank_lines_after_var_string_async]
+source='''baz  = 42
+"""A famous number.
+
+Answer about the univers.
+"""
+
+async def foo():
+    pass
+'''
+
+expected='''baz  = 42
+"""A famous number.
+
+Answer about the univers.
+"""
+
+
+async def foo():
+    pass
+'''
+
+[two_blank_lines_after_var_string_async_decorated]
+source='''baz  = 42
+"""A famous number.
+
+Answer about the univers.
+"""
+
+@bar
+async def foo():
+    pass
+'''
+
+expected='''baz  = 42
+"""A famous number.
+
+Answer about the univers.
+"""
+
+
+@bar
+async def foo():
+    pass
+'''

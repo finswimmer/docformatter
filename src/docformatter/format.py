@@ -281,10 +281,8 @@ def _get_attribute_docstring_newlines(
             continue
         break
 
-    if _next_idx < len(tokens):
-        _next_line = tokens[_next_idx].line
-        if _next_line.startswith("class") or _next_line.startswith("def"):
-            return 2
+    if _next_idx < len(tokens) and _classify.is_definition_line(tokens[_next_idx]):
+        return 2
 
     return 1
 
