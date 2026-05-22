@@ -234,6 +234,68 @@ def _do_update_token_indices(
     return tokens
 
 
+def _do_skip_to_next_non_blank_line(
+    tokens: list[tokenize.TokenInfo],
+    index: int,
+) -> int:
+    """Skip to the end of the current line and skip any trailing blank lines.
+
+    Parameters
+    ----------
+    tokens : list[tokenize.TokenInfo]
+        The list of tokens.
+    index : int
+        The index of the token at which to start skipping.
+
+    Returns
+    -------
+    int
+        The index after the end of the line and any blank lines.
+    """
+    while index < len(tokens) and tokens[index].type != tokenize.NEWLINE:
+        index += 1
+    index += 1
+    while index < len(tokens):
+        if tokens[index].type in (tokenize.NL, tokenize.NEWLINE):
+            index += 1
+        else:
+            break
+    return index
+
+
+def _do_skip_to_next_definition(
+    tokens: list[tokenize.TokenInfo],
+    index: int,
+) -> int:
+    """Skip decorators, comments, indent/dedent tokens, and blank lines.
+
+    Parameters
+    ----------
+    tokens : list[tokenize.TokenInfo]
+        The list of tokens.
+    index : int
+        The starting index.
+
+    Returns
+    -------
+    int
+        The index of the next meaningful token.
+    """
+    while index < len(tokens):
+        if tokens[index].type == tokenize.OP and tokens[index].string == "@":
+            index = _do_skip_to_next_non_blank_line(tokens, index)
+            continue
+        if tokens[index].type in (
+            tokenize.COMMENT,
+            tokenize.INDENT,
+            tokenize.DEDENT,
+        ):
+            index += 1
+            continue
+        break
+    return index
+
+
 def _get_attribute_docstring_newlines(
     tokens: list[tokenize.TokenInfo],
     index: int,
@@ -256,41 +318,8 @@ def _get_attribute_docstring_newlines(
     newlines : int
         The number of newlines to insert after the docstring.
     """
-    _num_tokens = len(tokens)
-    _offset = 2
-
-    for i in range(index + 2, _num_tokens):
-        if tokens[i].line == "\n":
-            _offset += 1
-        else:
-            break
-
-    _next_idx = index + _offset
-
-    # Skip over decorators, comments, and indent/dedent tokens to check for class or def
-    while _next_idx < len(tokens):
-        if tokens[_next_idx].type == tokenize.OP and tokens[_next_idx].string == "@":
-            # Skip to the end of the decorator line (handles multiline decorators)
-            while (
-                _next_idx < len(tokens) and tokens[_next_idx].type != tokenize.NEWLINE
-            ):
-                _next_idx += 1
-            _next_idx += 1
-            # Skip blank lines after decorator
-            while _next_idx < len(tokens):
-                if tokens[_next_idx].type in (tokenize.NL, tokenize.NEWLINE):
-                    _next_idx += 1
-                else:
-                    break
-            continue
-        if tokens[_next_idx].type in (
-            tokenize.COMMENT,
-            tokenize.INDENT,
-            tokenize.DEDENT,
-        ):
-            _next_idx += 1
-            continue
-        break
+    _next_idx = _do_skip_newlines(tokens, index)
+    _next_idx = _do_skip_to_next_definition(tokens, _next_idx)
 
     if _next_idx < len(tokens) and _classify.is_definition_line(tokens[_next_idx]):
         return 2
@@ -374,10 +403,7 @@ def _get_function_docstring_newlines(  # noqa: PLR0911
     # Scan ahead to skip decorators and check for def/async def
     while j < len(tokens):
         if tokens[j].type == tokenize.OP and tokens[j].string == "@":
-            # Skip to the end of the decorator line
-            while j < len(tokens) and tokens[j][0] != tokenize.NEWLINE:
-                j += 1
-            j += 1
+            j = _do_skip_to_next_non_blank_line(tokens, j)
             continue
 
         # The docstring is followed by an attribute assignment.
